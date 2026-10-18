@@ -81,7 +81,7 @@ jobs:
           retention-days: 30
 
       - name: Publish to CurseForge
-        if: github.ref == 'refs/heads/main' && secrets.CURSEFORGE_API_KEY != '' && vars.CURSEFORGE_PROJECT_ID != ''
+        if: github.ref == 'refs/heads/main' && env.CURSEFORGE_API_KEY != '' && env.CURSEFORGE_PROJECT_ID != ''
         env:
           CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
           CURSEFORGE_PROJECT_ID: ${{ vars.CURSEFORGE_PROJECT_ID }}
@@ -111,5 +111,8 @@ jobs:
             "https://minecraft.curseforge.com/api/projects/${CURSEFORGE_PROJECT_ID}/upload-file"
 
       - name: Explain skipped publishing
-        if: github.ref == 'refs/heads/main' && (secrets.CURSEFORGE_API_KEY == '' || vars.CURSEFORGE_PROJECT_ID == '')
+        if: github.ref == 'refs/heads/main' && (env.CURSEFORGE_API_KEY == '' || env.CURSEFORGE_PROJECT_ID == '')
+        env:
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+          CURSEFORGE_PROJECT_ID: ${{ vars.CURSEFORGE_PROJECT_ID }}
         run: echo "Build succeeded and ZIP artifact was created. Publishing skipped because CURSEFORGE_API_KEY secret and/or CURSEFORGE_PROJECT_ID variable is not configured."
