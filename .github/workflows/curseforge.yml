@@ -1,0 +1,115 @@
+name: Build and publish CurseForge modpack
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pack/**"
+      - ".github/workflows/curseforge.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: curseforge-pack-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate exported CurseForge profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f pack/manifest.json || {
+            echo "::error::Missing pack/manifest.json. Export your existing CurseForge profile and copy its manifest.json into pack/ first."
+            exit 1
+          }
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("pack/manifest.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          required = ["minecraft", "manifestType", "manifestVersion", "name", "version", "author", "files"]
+          missing = [k for k in required if k not in data]
+          if missing:
+              raise SystemExit(f"manifest.json is missing required keys: {', '.join(missing)}")
+          if data["manifestType"] != "minecraftModpack":
+              raise SystemExit("manifestType must be minecraftModpack")
+          if not isinstance(data["files"], list):
+              raise SystemExit("manifest files must be an array of CurseForge project/file IDs")
+          if not isinstance(data.get("minecraft", {}).get("modLoaders"), list) or not data["minecraft"]["modLoaders"]:
+              raise SystemExit("manifest.minecraft.modLoaders must identify the pack's loader")
+          if not data.get("minecraft", {}).get("version"):
+              raise SystemExit("manifest.minecraft.version is required")
+          print(f"Validated {data['name']} {data['version']} for Minecraft {data['minecraft']['version']}")
+          PY
+
+      - name: Assemble CurseForge-compatible ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # CurseForge expects manifest.json at the ZIP root and pack files inside overrides/.
+          rm -rf build
+          mkdir -p build/overrides
+          cp pack/manifest.json build/manifest.json
+          if [ -d pack/overrides ]; then
+            cp -a pack/overrides/. build/overrides/
+          fi
+          (cd build && zip -qr "../dist/create-ultimate-engineering.zip" manifest.json overrides)
+          unzip -l dist/create-ultimate-engineering.zip
+          python - <<'PY'
+          from zipfile import ZipFile
+          with ZipFile("dist/create-ultimate-engineering.zip") as z:
+              names = z.namelist()
+              assert "manifest.json" in names, "manifest.json must be at ZIP root"
+              assert any(n.startswith("overrides/") for n in names), "overrides folder should be present"
+          PY
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: create-ultimate-engineering-curseforge
+          path: dist/create-ultimate-engineering.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish to CurseForge
+        if: github.ref == 'refs/heads/main' && secrets.CURSEFORGE_API_KEY != '' && vars.CURSEFORGE_PROJECT_ID != ''
+        env:
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+          CURSEFORGE_PROJECT_ID: ${{ vars.CURSEFORGE_PROJECT_ID }}
+          ZIP_PATH: dist/create-ultimate-engineering.zip
+          GITHUB_SHA_SHORT: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' > /tmp/curseforge-metadata.json
+          import json, os
+          from pathlib import Path
+          manifest = json.loads(Path("pack/manifest.json").read_text(encoding="utf-8"))
+          metadata = {
+              "changelog": "Automated build from Git commit " + os.environ["GITHUB_SHA_SHORT"][:7],
+              "changelogType": "text",
+              "displayName": f'{manifest["name"]} {manifest["version"]}',
+              "releaseType": "beta",
+              "gameVersionNames": [manifest["minecraft"]["version"]]
+          }
+          print(json.dumps(metadata))
+          PY
+          # Keep the API token out of command-line arguments and logs.
+          curl --fail-with-body --silent --show-error \
+            -H "X-Api-Token: ${CURSEFORGE_API_KEY}" \
+            -F "metadata=@/tmp/curseforge-metadata.json;type=application/json" \
+            -F "file=@${ZIP_PATH};type=application/zip" \
+            "https://minecraft.curseforge.com/api/projects/${CURSEFORGE_PROJECT_ID}/upload-file"
+
+      - name: Explain skipped publishing
+        if: github.ref == 'refs/heads/main' && (secrets.CURSEFORGE_API_KEY == '' || vars.CURSEFORGE_PROJECT_ID == '')
+        run: echo "Build succeeded and ZIP artifact was created. Publishing skipped because CURSEFORGE_API_KEY secret and/or CURSEFORGE_PROJECT_ID variable is not configured."
